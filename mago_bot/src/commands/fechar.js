@@ -1,18 +1,34 @@
-module.exports = async function handleFechar(msg, sock, isOwner) {
+module.exports = async (msg, sock, args, isOwner) => {
+  console.log("Comando 'fechar' chamado.");
+
+  // Verifica se a pessoa que executou o comando é o dono
   if (!isOwner) {
-    await sendMessageWithReaction(msg, sock, "*Você não tem permissão para usar este comando.*", "❌");
+    await sock.sendMessage(msg.key.remoteJid, {
+      text: "*Você não tem permissão para usar este comando.*\n\n" + getMessageEnd(),
+    });
     return;
   }
 
+  // Verifica se o bot é administrador do grupo
   const botAdmin = await isBotAdmin(msg.key.remoteJid, sock);
   if (!botAdmin) {
-    await sendMessageWithReaction(msg, sock, "*Não posso fechar o grupo porque não sou administrador.*", "❌");
+    console.log("O bot não é administrador, não pode fechar o grupo.");
+    await sendErrorMessage(sock, msg, "*Não posso fechar o grupo porque não sou administrador.*");
     return;
   }
 
-  await sock.groupSettingUpdate(msg.key.remoteJid, "announcement");
-  await sendMessageWithReaction(msg, sock, "*O grupo foi fechado!* 🔒", "✅");
-};
+  // Tenta fechar o grupo
+  try {
+    console.log("Tentando fechar o grupo...");
+    await sock.groupSettingUpdate(msg.key.remoteJid, "announcement");
+    await sock.sendMessage(msg.key.remoteJid, {
+      text: "*O grupo foi fechado!* 🔒\n\n" + getMessageEnd(),
+    });
+  } catch (error) {
+    console.error("Erro ao tentar fechar o grupo:", error);
+    await sendErrorMessage(sock, msg, "*Ocorreu um erro ao tentar fechar o grupo.*");
+  }
+}
 
 // Função para verificar se o bot é administrador
 async function isBotAdmin(groupId, sock) {
@@ -20,15 +36,34 @@ async function isBotAdmin(groupId, sock) {
     const groupMetadata = await sock.groupMetadata(groupId);
     const botId = sock.user.id || sock.info.me.id;
 
-    const botAdmin = groupMetadata.participants.find(participant => participant.id === botId && participant.admin);
-    return botAdmin ? true : false;
+    const botPhoneNumber = botId.split(":")[0];
+    console.log("ID do bot:", botPhoneNumber);
+
+    return groupMetadata.participants.some(participant => {
+      const adminStatus = (participant.admin || '').trim();
+      const participantId = participant.id.split(":")[0];
+
+      console.log("Verificando participante:", participantId);
+      console.log("Admin Status:", adminStatus);
+
+      return participantId === botPhoneNumber && adminStatus === 'admin';
+    });
   } catch (error) {
     console.error("Erro ao verificar se o bot é administrador:", error);
     return false;
   }
 }
 
-async function sendMessageWithReaction(msg, sock, text, emoji) {
-  await sock.sendMessage(msg.key.remoteJid, { text: `${text}\n\n` });
-  await sock.sendMessage(msg.key.remoteJid, { react: { text: emoji, key: msg.key } });
+// Função de envio de mensagem de erro
+async function sendErrorMessage(sock, msg, message) {
+  await sock.sendMessage(msg.key.remoteJid, {
+    text: message + "\n\n" + getMessageEnd(),
+  });
+  await sock.sendMessage(msg.key.remoteJid, {
+    react: { text: "❌", key: msg.key },
+  });
+}
+
+function getMessageEnd() {
+  return "Se precisar de ajuda, fale com o administrador!";
 }
