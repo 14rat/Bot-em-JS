@@ -4,18 +4,19 @@ const fs = require('fs');
 const path = require('path');
 const qrcode = require('qrcode');
 const { PREFIX, OWNER_PHONE_NUMBER } = require('./config');
-const {
-  comandoAdivinha,
-  tentarAdivinhar
-} = require('./commands/advinha');
+const { comandoAdivinha, tentarAdivinhar } = require('./commands/advinha');
 const comandoInfo = require('./commands/info');
-const comandoVoz = require('./commands/voz'); // Comando de voz
+const comandoVoz = require('./commands/voz');
+const { createStickerCommand } = require('./commands/sticker');
+const { downloadYouTubeVideo } = require('./commands/youtube');
+const { checkUrlCommand } = require('./commands/checkurl');
+const { getSimSimiResponse } = require('./utils/simi-api');
 
-// Estado do bot
 let botStartTime = Date.now();
 let aguardandoAudio = new Set();
+let stickerMode = false;
+let simiAtivo = false;
 
-// Função para inicializar o bot
 async function startBot() {
   console.log("Iniciando o bot...");
 
@@ -24,14 +25,18 @@ async function startBot() {
 
   const sock = makeWASocket({
     auth: state,
-    printQRInTerminal: false,
+    printQRInTerminal: false, // Desativa o QR Code no terminal
     logger: pino({ level: 'silent' }),
   });
 
   sock.ev.on('creds.update', saveCreds);
-
   sock.ev.on('connection.update', (update) => handleConnectionUpdate(update, sock));
-  sock.ev.on('messages.upsert', async (message) => await handleMessage(message, sock));
+
+  // Adiciona o ouvinte para 'messages.upsert', que será chamado toda vez que uma nova mensagem chegar
+  sock.ev.on('messages.upsert', async (m) => {
+    // Chama handleMessage para processar as mensagens recebidas
+    await handleMessage(m, sock);
+  });
 }
 
 // Função para tratar eventos de conexão
@@ -44,9 +49,10 @@ function handleConnectionUpdate(update, sock) {
     console.log("Conexão aberta com sucesso!");
   }
 
+  // Gerar o QR Code se ele for recebido
   if (qr) {
     console.log('QR Code Recebido!');
-    generateQRCode(qr);
+    generateQRCode(qr); // Chama a função para gerar o QR Code
   }
 
   if (connection === 'close') {
@@ -60,64 +66,120 @@ function handleConnectionUpdate(update, sock) {
   }
 }
 
-// Função para gerar o QR Code
+// Função para gerar o QR Code e salvar como imagem
 function generateQRCode(qr) {
-  const qrImagePath = path.join(__dirname, 'src', 'QRCODE', 'qr-code.png');
+  const qrImagePath = path.join(__dirname, 'QRCODE', 'qr-code.png');  // Caminho para salvar o QR Code
   const qrDir = path.dirname(qrImagePath);
+
+  // Verifica se o diretório existe, se não, cria
   if (!fs.existsSync(qrDir)) {
+    console.log(`Criando diretório: ${qrDir}`);
     fs.mkdirSync(qrDir, { recursive: true });
   }
 
+  // Gera o QR Code e salva como imagem PNG
   qrcode.toFile(qrImagePath, qr, { type: 'png' }, (err) => {
     if (err) {
-      console.error("Erro ao gerar o QR code: ", err);
+      console.error("Erro ao gerar o QR Code:", err);
     } else {
-      console.log(`QR Code salvo em ${qrImagePath}.`);  // Correção aqui: use crases para interpolação
+      console.log(`QR Code salvo em ${qrImagePath}.`);
     }
   });
 }
 
-// Função para processar mensagens recebidas
 async function handleMessage({ messages }, sock) {
   const msg = messages[0];
   console.log("Mensagem processada:", msg);
 
   if (!msg.message || msg.key.fromMe) return;
 
-  // Verificar se a mensagem é de áudio
   if (msg.message.audioMessage) {
     console.log("Mensagem de áudio detectada!");
-    return await handleVoiceMessage(msg, sock); // Chama diretamente a função de áudio
+    return await handleVoiceMessage(msg, sock); 
   }
 
   const text = msg.message.conversation || msg.message.extendedTextMessage?.text;
 
-  // Verifica se é uma mensagem de comando (inicia com o PREFIX)
   if (text && text.startsWith(PREFIX)) {
     const commandText = text.slice(PREFIX.length).trim();
     const [command, ...args] = commandText.split(" ");
     const isOwner = msg.key.remoteJid === OWNER_PHONE_NUMBER;
 
     console.log("Comando identificado:", command);
-
-    // Verificar comandos de áudio (por exemplo, o comando !audio)
-    if (command === 'audio') {
-      return await handleAudio(msg, sock);
+    
+    // Processando os comandos para ativar/desativar o SimSimi
+    if (command === 'simi' && args[0] !== 'desativar') {
+      simiAtivo = true;  // Ativando o SimSimi
+      await sendMessageWithReaction(msg, sock, "*SimSimi ativado. Agora, pode enviar mensagens para o SimSimi responder!*", "✅");
+      return;
     }
 
-    // Comandos disponíveis
+    if (command === 'simi' && args[0] === 'desativar') {
+      simiAtivo = false;  // Desativando o SimSimi
+      await sendMessageWithReaction(msg, sock, "*SimSimi desativado. O bot não vai mais responder às suas mensagens.*", "❌");
+      return;
+    }
+
+    // Se o SimSimi estiver ativado, responder automaticamente com as mensagens subsequentes
+    if (simiAtivo && text) {
+      const simiResponse = await getSimSimiResponse(text);  // Chama a função que processa a resposta do SimSimi
+      await sendMessageWithReaction(msg, sock, simiResponse, "🐥");  // Envia a resposta com reação
+      return;
+    }
+
+
+    if (command === 'sticker') {
+      stickerMode = true;
+      await sendMessageWithReaction(msg, sock, "*Modo de figurinha ativado. Envie uma mídia para criar uma figurinha.*", "✅");
+      return;
+    }
+
+    if (command === 'checkurl') {
+      console.log('Comando !checkurl detectado');
+      await checkUrlCommand(msg, sock, args);
+      return;
+    }
+
+    if (command === 'youtube') {
+      await downloadYouTubeVideo(msg, sock, args);
+      return;
+    }
+
+    if (command === 'encurtaurl') {
+      console.log('Comando !encurtaurl detectado');
+      const url = args.join(" ").trim();
+      console.log("URL a ser encurtada:", url);
+      const urlEncurtada = await require('./commands/encurtaurl')(msg, sock, url);
+      return;
+    }
+
     const commandHandlers = getCommandHandlers();
     if (commandHandlers[command]) {
       console.log("Comando encontrado no manipulador:", command);
-      await commandHandlers[command](msg, sock, args, isOwner);  // Passa isOwner para a função
+      await commandHandlers[command](msg, sock, args, isOwner); 
     } else {
-      console.log(`Comando não encontrado: ${command}`);  // Correção aqui: use crases para interpolação
+      console.log(`Comando não encontrado: ${command}`);
       await sendMessageWithReaction(msg, sock, "*Comando não encontrado. Tente novamente.*", "❌");
+    }
+  }
+
+  if (stickerMode && (msg.message.imageMessage || msg.message.videoMessage || msg.message.gifMessage)) {
+    console.log("Mídia recebida para sticker:", msg.message);
+    try {
+      await createStickerCommand(msg, sock);
+      stickerMode = false; 
+    } catch (error) {
+      console.error('Erro ao processar a figurinha:', error);
+      await sock.sendMessage(msg.key.remoteJid, { text: 'Houve um erro ao criar a figurinha. Tente novamente mais tarde.' });
     }
   }
 }
 
-// Função para obter os manipuladores de comando
+async function sendMessageWithReaction(msg, sock, text, emoji) {
+  await sock.sendMessage(msg.key.remoteJid, { text: `${text}\n\n` });
+  await sock.sendMessage(msg.key.remoteJid, { react: { text: emoji, key: msg.key } });
+}
+
 function getCommandHandlers() {
   return {
     ping: require('./commands/ping'),
@@ -132,24 +194,12 @@ function getCommandHandlers() {
     moeda: require('./commands/moeda'),
     dado: require('./commands/dado'),
     uptime: require('./commands/uptime'),
-    fechar: require('./commands/fechar'),  // Importa o comando de fechar
-    info: comandoInfo,
+    fechar: require('./commands/fechar'),
+    info: require('./commands/info'),
+    noticias: require('./commands/noticias'),
   };
 }
 
-// Função para lidar com comandos de áudio
-async function handleAudio(msg, sock) {
-  console.log("Aguardando áudio do usuário...");
-
-  if (aguardandoAudio.has(msg.key.remoteJid)) {
-    await sendMessageWithReaction(msg, sock, "Já estou aguardando um áudio para este chat.", "❌");
-  } else {
-    aguardandoAudio.add(msg.key.remoteJid);
-    await sendMessageWithReaction(msg, sock, "Agora aguardo seu áudio. Por favor, envie-o.", "✅");
-  }
-}
-
-// Função para lidar com mensagens de voz
 async function handleVoiceMessage(msg, sock) {
   console.log("Entrou na função handleVoiceMessage!");
 
@@ -158,7 +208,7 @@ async function handleVoiceMessage(msg, sock) {
     const audioUrl = msg.message.audioMessage.url;
     console.log("URL do áudio:", audioUrl);
 
-    await comandoVoz(msg, sock, audioUrl); // Aqui chama o comando do arquivo voz.js
+    await comandoVoz(msg, sock, audioUrl); 
     aguardandoAudio.delete(msg.key.remoteJid);
   } else {
     console.log("Áudio recebido, mas não estava aguardando áudio.");
@@ -166,16 +216,4 @@ async function handleVoiceMessage(msg, sock) {
   }
 }
 
-// Função para enviar mensagens com reações
-async function sendMessageWithReaction(msg, sock, text, emoji) {
-  await sock.sendMessage(msg.key.remoteJid, { text: `${text}\n\n` });  // Correção aqui: use crases para interpolação
-  await sock.sendMessage(msg.key.remoteJid, { react: { text: emoji, key: msg.key } });
-}
-
-// Função para normalizar o comando (em minúsculas)
-function normalizeCommand(command) {
-  return command.trim().toLowerCase();
-}
-
-// Iniciar o bot
 startBot();

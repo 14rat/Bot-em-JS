@@ -6,11 +6,10 @@ const path = require('path');
 // Função para enviar o áudio para a API 
 const enviarAudioParaAPI = async (audioFilePath) => {
   try {
-    // Cria um formulário para enviar o arquivo de áudio
     const form = new FormData();
     form.append('audio', fs.createReadStream(audioFilePath));
 
-    const apiUrl = 'https://d659-179-225-235-128.ngrok-free.app/processar_audio'; 
+    const apiUrl = 'https://94b9-179-119-58-18.ngrok-free.app/processar_audio'; 
 
     // Fazendo a requisição POST para enviar o áudio
     const response = await axios.post(apiUrl, form, {
@@ -36,13 +35,13 @@ const enviarAudioParaAPI = async (audioFilePath) => {
       if (data.audio) {
         console.log("Áudio gerado (em Base64):", data.audio);
 
-        
+
         const buffer = Buffer.from(data.audio, 'base64');
-        fs.writeFileSync('resposta_audio.ogg', buffer);
-        console.log('Áudio gerado salvo como resposta_audio.ogg');
+        fs.writeFileSync('resposta_audio.mp3', buffer);
+        console.log('Áudio gerado salvo como resposta_audio.mp3');
       }
 
-      return data;  // Retorna os dados da resposta
+      return data;  
     } else {
       throw new Error(`Erro inesperado da API: ${response.statusText}`);
     }

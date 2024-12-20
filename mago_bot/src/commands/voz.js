@@ -1,83 +1,111 @@
-const { MessageType } = require('@whiskeysockets/baileys');
 const fs = require('fs');
 const path = require('path');
-const axios = require('axios');
-const { enviarAudioParaAPI } = require('../utils/voz-api'); 
-const mime = require('mime');  
+const ffmpeg = require('fluent-ffmpeg');
 const crypto = require('crypto');
+const { downloadMediaMessage } = require('@whiskeysockets/baileys');
+const { exec } = require('child_process');
 
 module.exports = async (msg, sock) => {
   const message = msg.message;
-
-  console.log("Função de áudio (voz.js) chamada!"); 
+  console.log("Função de áudio (voz.js) chamada!");
 
   if (message && message.audioMessage) {
-    console.log("Iniciando o processamento do áudio...");  
+    console.log("Iniciando o processamento do áudio...");
+
     const audioMessage = message.audioMessage;
 
-    // Extraímos a URL do áudio
-    const audioUrl = audioMessage.url;
-    console.log('URL do áudio:', audioUrl); 
-
-    if (audioUrl) {
+    if (audioMessage) {
       try {
-        // Fazendo o download do áudio usando a URL
-        const response = await downloadAudio(audioUrl);
+        console.log("Baixando a mídia...");
 
-        
-        if (response) {
-          const { filePath, data } = response;
+        // Baixar o arquivo criptografado .enc 
+        const mediaStream = await downloadMediaMessage(msg, { logger: console, decrypt: true });
 
-          // Salva o áudio no diretório
-          fs.writeFileSync(filePath, data);
-          console.log(`Áudio salvo em ${filePath}`);
+        if (!mediaStream) {
+          throw new Error("Erro ao baixar a mídia.");
+        }
 
-      
-          await sock.sendMessage(msg.key.remoteJid, { text: `Mensagem de voz recebida e salva em ${filePath}` });
-          const apiResponse = await enviarAudioParaAPI(filePath);
+        // Converter o stream para buffer
+        const buffer = await new Promise((resolve, reject) => {
+          streamToBuffer(mediaStream, (err, buffer) => {
+            if (err) return reject(`Erro ao converter stream para buffer: ${err.message}`);
+            resolve(buffer);
+          });
+        });
 
-          console.log("Resposta da API:", apiResponse);
+        // Verificar o tamanho do arquivo
+        if (buffer.length === 0) {
+          throw new Error("O arquivo baixado está vazio.");
+        }
+        console.log(`Tamanho do arquivo baixado: ${buffer.length} bytes`);
+
+        const inputAudioDir = path.join(__dirname, './audios');
+
+        // Salvar o arquivo de entrada na pasta correta 
+        const inputFilePath = path.join(inputAudioDir, `${crypto.randomBytes(8).toString('hex')}.enc`);
+        fs.writeFileSync(inputFilePath, buffer);
+        console.log(`Arquivo de entrada salvo em: ${inputFilePath}`);
+
+        const fileType = await checkFileType(inputFilePath);
+        console.log(`Tipo de arquivo detectado: ${fileType}`);
+
+        // Processar diferentes tipos de áudio
+        let outputFilePath = '';
+        if (fileType.startsWith('audio/ogg') || fileType.startsWith('audio/mpeg') || fileType.startsWith('audio/wav')) {
           
-          if (apiResponse.audio) {
-            console.log("Áudio gerado retornado pela API com sucesso.");
-
-            await sock.sendMessage(msg.key.remoteJid, {
-              audio: Buffer.from(apiResponse.audio, 'base64'),
-              mimetype: 'audio/ogg',
-              ptt: true
-            });
-
-          } else if (apiResponse.transcricao) {
-            console.log("Transcrição retornada pela API:", apiResponse.transcricao);
-
-            await sock.sendMessage(msg.key.remoteJid, {
-              text: `Transcrição do áudio: ${apiResponse.transcricao}\nFiltrado: ${apiResponse.filtrado || "N/A"}`
-            });
-
-          } else if (apiResponse.resultados) {
-            console.log("Resultados da pesquisa:", apiResponse.resultados);
-
-            const resultadosFormatados = apiResponse.resultados.map(item => {
-              return `**${item.titulo}**\n${item.link}\n${item.descricao}\n—`;
-            }).join('\n');
-
-            // Enviar os resultados formatados para o usuário
-            await sock.sendMessage(msg.key.remoteJid, { text: resultadosFormatados });
-
-          } else {
-            console.error("A API não retornou áudio nem transcrição.");
-            await sock.sendMessage(msg.key.remoteJid, { text: "Erro: A API não retornou áudio nem transcrição válidos." });
-          }
+          outputFilePath = await processAudio(inputFilePath, 'mp3');
         } else {
-          throw new Error('Erro ao baixar o áudio.');
+          throw new Error("Formato de áudio não suportado.");
+        }
+
+        // Após a conversão, excluir o arquivo temporário
+        fs.unlinkSync(inputFilePath);
+        console.log(`Arquivo convertido para o formato desejado e salvo em ${outputFilePath}`);
+
+        // Chamar a API para processar o áudio 
+        const data = await require('../utils/voz-api').enviarAudioParaAPI(outputFilePath);
+
+        if (data.resultados) {
+          // Criar a mensagem com os artigos
+          const artigosMensagem = data.resultados.map((artigo, index) => {
+            return `${index + 1}. Título: ${artigo.titulo}\nDescrição: ${artigo.descricao}\nLink: ${artigo.link}\n`;
+          }).join("\n");
+
+          // Enviar a mensagem de texto com os artigos
+          await sock.sendMessage(msg.key.remoteJid, { text: artigosMensagem });
+
+          const audioPath = path.join(__dirname,'./audios','resposta_audio.mp3');
+
+          // Função para enviar o áudio 
+          const sendAudioMessage = async (sock, jid) => {
+            try {
+              // Lê o arquivo de áudio em buffer
+              const audioBuffer = fs.readFileSync(audioPath);
+
+              // Envia a mensagem de voz
+              await sock.sendMessage(jid, {
+                audio: audioBuffer,
+                mimetype: 'audio/mp4', 
+                ptt: true,  
+              }, { quoted: msg });
+
+              console.log("Áudio enviado com sucesso!");
+            } catch (error) {
+              console.error("Erro ao enviar o áudio:", error.message);
+            }
+          };
+
+          // Enviar a mensagem de áudio para o remetente
+          const jid = msg?.key?.remoteJid;  // Jid do remetente
+          await sendAudioMessage(sock, jid);
+        } else {
+          console.error("Erro na API de voz: resultados não encontrados.");
+          await sock.sendMessage(msg.key.remoteJid, { text: "Houve um erro ao tentar processar os resultados do áudio." });
         }
       } catch (error) {
-        console.error("Erro ao baixar ou processar o áudio:", error.message);
+        console.error("Erro no processamento do áudio:", error.message);
         await sock.sendMessage(msg.key.remoteJid, { text: "Houve um erro ao tentar baixar ou processar o áudio." });
       }
-    } else {
-      console.log("URL da mensagem de voz não encontrada.");
-      await sock.sendMessage(msg.key.remoteJid, { text: "Não foi possível encontrar a URL do áudio enviado." });
     }
   } else {
     console.log("A mensagem não contém um áudio válido.");
@@ -85,44 +113,69 @@ module.exports = async (msg, sock) => {
   }
 };
 
-async function downloadAudio(url) {
-  const retryAttempts = 3;  
-  let attempts = 0;
-
-  while (attempts < retryAttempts) {
-    try {
-      attempts++;
-      console.log(`Tentando baixar o áudio... Tentativa ${attempts} de ${retryAttempts}`);
-
-      const response = await axios({
-        method: 'get',
-        url: url,
-        responseType: 'arraybuffer',
-      });
-
-      console.log(`Resposta recebida com status: ${response.status}`);
-      const mimeType = response.headers['content-type'];
-      console.log('Tipo MIME do arquivo:', mimeType);
-
-      if (mimeType && mimeType.startsWith('audio/')) {
-        const fileExtension = mime.getExtension(mimeType);  
-        const filePath = path.join(__dirname, 'audios', `${crypto.randomBytes(8).toString('hex')}.${fileExtension}`);
-
-        return { filePath, data: response.data }; 
+// Função para verificar o tipo de arquivo
+function checkFileType(filePath) {
+  return new Promise((resolve, reject) => {
+    exec(`file --mime-type -b ${filePath}`, (err, stdout, stderr) => {
+      if (err) {
+        reject(`Erro ao verificar tipo de arquivo: ${stderr || err.message}`);
+      } else {
+        resolve(stdout.trim());
       }
-      if (mimeType === 'application/octet-stream') {
-        console.log("Tipo MIME genérico detectado, tratando como áudio...");
-        const filePath = path.join(__dirname, 'audios', `${crypto.randomBytes(8).toString('hex')}.ogg`);
-        return { filePath, data: response.data };  
-      }
+    });
+  });
+}
 
-      throw new Error('O arquivo não é um áudio válido.');
-    } catch (error) {
-      console.error(`Erro ao baixar o áudio, tentativa falhou: ${error.message}`);
-      if (attempts === retryAttempts) {
-        console.error('Número de tentativas excedido. Não foi possível baixar o áudio.');
-        return null;
-      }
+// Função para processar áudio e salvar no formato correto
+async function processAudio(inputFilePath, format) {
+  const audioDir = path.join(__dirname, './audios'); 
+
+  const outputFilePath = path.join(audioDir, `${crypto.randomBytes(8).toString('hex')}.${format}`);
+  console.log(`Caminho de saída para ffmpeg: ${outputFilePath}`);
+
+  await convertAudio(inputFilePath, outputFilePath, format);
+  return outputFilePath;
+}
+
+// Função para converter áudio para o formato desejado
+function convertAudio(inputFilePath, outputFilePath, format) {
+  return new Promise((resolve, reject) => {
+    console.log(`Iniciando conversão para ${format} de: ${inputFilePath} para: ${outputFilePath}`);
+
+    let ffmpegCommand = ffmpeg(inputFilePath).on('end', () => {
+      console.log(`Áudio convertido para ${format} com sucesso!`);
+      resolve();
+    }).on('error', (err) => {
+      console.error(`Erro na conversão para ${format}: ${err.message}`);
+      reject(new Error(`Erro na conversão para ${format}: ${err.message}`));
+    });
+
+    switch (format) {
+      case 'mp3':
+        ffmpegCommand = ffmpegCommand.audioCodec('libmp3lame').audioBitrate('128k');
+        break;
+      case 'wav':
+        ffmpegCommand = ffmpegCommand.audioCodec('pcm_s16le').audioBitrate('128k');
+        break;
+      default:
+        reject(new Error('Formato de áudio não suportado'));
+        return;
     }
-  }
+
+    ffmpegCommand.save(outputFilePath);
+  });
+}
+
+// Função para converter o stream para buffer
+function streamToBuffer(stream, callback) {
+  let chunks = [];
+  stream.on('data', chunk => {
+    chunks.push(chunk);
+  });
+  stream.on('end', () => {
+    callback(null, Buffer.concat(chunks));
+  });
+  stream.on('error', err => {
+    callback(err, null);
+  });
 }

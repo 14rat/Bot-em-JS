@@ -19,6 +19,11 @@ module.exports = async function handleMenu(msg, sock) {
 | 🤑 !adivinha
 | 🤑 !pesquisar
 | 🤑 !audio
+| 🤑 !sticker
+| 🤑 !youtube
+| 🤑 !checkurl
+| 🤑 !encurtaurl
+| 🤑 !noticias
 ╰════════════════════╯`;
 
   await sendMessageWithReaction(msg, sock, menu, "📜");
